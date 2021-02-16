@@ -20,7 +20,7 @@ use postcard::{flavors, from_bytes_cobs, serialize_with_flavor, Error};
 use serde::{Deserialize, Serialize};
 
 use stm32f4::stm32f446::{ADC1, TIM1};
-use stm32f4xx_hal::{gpio, prelude::*, delay::Delay, i2c::I2c, serial, timer, adc::{
+use stm32f4xx_hal::{gpio, prelude::*, serial, timer, adc::{
     Adc,
     config::AdcConfig,
     config::SampleTime,
@@ -34,8 +34,6 @@ use stm32f4xx_hal::{gpio, prelude::*, delay::Delay, i2c::I2c, serial, timer, adc
 
 use crate::protocol::Response;
 use core::{cell::RefCell, borrow::{Borrow, BorrowMut}};
-use stm32f4xx_hal::gpio::Analog;
-use stm32f4xx_hal::gpio::gpioa::PA4;
 
 type Uart4Tx = gpio::gpioc::PC10<gpio::Alternate<gpio::AF8>>;
 type Uart4Rx = gpio::gpioc::PC11<gpio::Alternate<gpio::AF8>>;
@@ -46,14 +44,12 @@ type Pa5 = gpio::gpioa::PA5<gpio::Analog>;
 type Pa6 = gpio::gpioa::PA6<gpio::Analog>;
 type Pa7 = gpio::gpioa::PA7<gpio::Analog>;
 
-static ADC: Mutex<RefCell<Option<Adc<stm32::ADC1>>>> = Mutex::new(RefCell::new(None));
-
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct ModelArm {
-    lower_axis: u16,
-    central_axis: u16,
-    upper_axis: u16,
-    rotation_axis: u16,
+    pub lower_axis: u16,
+    pub central_axis: u16,
+    pub upper_axis: u16,
+    pub rotation_axis: u16,
 }
 
 // impl ModelArm {
@@ -123,7 +119,6 @@ const APP: () = {
         arm: ModelArm,
         arm_adc: ArmAdc,
         uart4: Uart4,
-        // adc_pins: (Pa4, Pa5, Pa6, Pa7),
     }
 
     #[init]
@@ -147,8 +142,6 @@ const APP: () = {
         let gpioc = context.device.GPIOC.split();
 
         // Create a delay abstraction based on SysTick
-        let mut _delay = Delay::new(context.core.SYST, clocks);
-
         let uart4_channels = (
             gpioc.pc10.into_alternate_af8(), // UART4_TX
             gpioc.pc11.into_alternate_af8(), // UART4_RX
@@ -165,8 +158,11 @@ const APP: () = {
             },
             clocks,
         ).unwrap();
-
-        // uart4.listen(serial::Event::Rxne);
+        uart4.listen(serial::Event::Rxne);
+        // Hello world!
+        for byte in b"hello from STM32!".iter() {
+            block!(uart4.write(*byte)).unwrap();
+        }
 
         // let config = AdcConfig::default().end_of_conversion_interrupt(Eoc::Conversion);
 
@@ -204,7 +200,7 @@ const APP: () = {
         timer.listen(timer::Event::TimeOut);
 
 
-        let arm = ModelArm {
+        let mut arm = ModelArm {
             lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480),
             central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480),
             upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480),
@@ -215,46 +211,36 @@ const APP: () = {
             arm,
             uart4,
             arm_adc,
-            // adc_pins,
         }
     }
 
     #[task(binds = TIM6_DAC, resources = [arm_adc, arm], priority = 3)]
     fn tim6_interrupt(context: tim6_interrupt::Context) {
-        // context.resources.arm_adc.lock(|arm_adc_guard| {
         // arm adc critical section
-        let v = context.resources.arm_adc.adc.convert(&mut context.resources.arm_adc.pin0, SampleTime::Cycles_480);
-        // if let Some(ref mut adc) = ADC.borrow(arm_adc_guard).borrow_mut().deref_mut() {
-        //     let sample = adc.convert(&pins, SampleTime::Cycles_480);
-        // rprintln!("{}", sample);
-        // }
-
+        let mut arm_ptr = context.resources.arm;
+        let mut arm_adc_ptr = context.resources.arm_adc;
+        arm_ptr.lock(|arm_ptr| {
+            arm_ptr.lower_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+            arm_ptr.central_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin1, SampleTime::Cycles_480);
+            arm_ptr.upper_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin2, SampleTime::Cycles_480);
+            arm_ptr.rotation_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin3, SampleTime::Cycles_480);
+            // rprintln!("{:?}", arm_adc_ptr.adc.sample_to_millivolts(arm_ptr.lower_axis));
+        });
     }
 
-    // #[task(binds = UART4, resources = [uart4, arm], priority = 1)]
-    // fn uart4_on_rxne (context: uart4_on_rxne::Context){
-    //     let response =
-    //         protocol::Response
-    //         {
-    //             status: protocol::Status::OK,
-    //             data: Some(postcard::to_vec(&context.resources.arm).unwrap())
-    //         };
-    //     let buf: heapless::Vec<u8, heapless::consts::U1024> =
-    //         postcard::to_vec_cobs(&response).unwrap();
-    //     for byte in buf.iter() {
-    //         block!(context.resources.uart4.write(*byte)).unwrap()
-    //     }
-    // }
+    #[task(binds = UART4, resources = [uart4, arm], priority = 10)]
+    fn uart4_on_rxne (context: uart4_on_rxne::Context){
+        let response =
+            protocol::Response {
+                status: protocol::Status::OK,
+                data: Some(postcard::to_vec(context.resources.arm).unwrap())
+            };
+        rprintln!("{:?}", response);
+        let buf: heapless::Vec<u8, heapless::consts::U1024> =
+            postcard::to_vec_cobs(&response).unwrap();
+        for byte in buf.iter() {
+            block!(context.resources.uart4.write(*byte)).unwrap()
+        }
+
+    }
 };
-
-// let i2c_channels = (
-// 	gpiob.pb8.into_alternate_af4_open_drain(),
-// 	gpiob.pb9.into_alternate_af4_open_drain(),
-// );
-
-// let mut i2c = I2c::i2c1 (
-// 	context.device.I2C1,
-// 	i2c_channels,
-// 	100.khz(),
-// 	clocks
-// );
