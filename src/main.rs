@@ -34,6 +34,8 @@ use stm32f4xx_hal::{gpio, prelude::*, delay::Delay, i2c::I2c, serial, timer, adc
 
 use crate::protocol::Response;
 use core::{cell::RefCell, borrow::{Borrow, BorrowMut}};
+use stm32f4xx_hal::gpio::Analog;
+use stm32f4xx_hal::gpio::gpioa::PA4;
 
 type Uart4Tx = gpio::gpioc::PC10<gpio::Alternate<gpio::AF8>>;
 type Uart4Rx = gpio::gpioc::PC11<gpio::Alternate<gpio::AF8>>;
@@ -48,10 +50,10 @@ static ADC: Mutex<RefCell<Option<Adc<stm32::ADC1>>>> = Mutex::new(RefCell::new(N
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
 pub struct ModelArm {
-    lower_axis    : u16,
-    central_axis  : u16,
-    upper_axis    : u16,
-    rotation_axis : u16,
+    lower_axis: u16,
+    central_axis: u16,
+    upper_axis: u16,
+    rotation_axis: u16,
 }
 
 // impl ModelArm {
@@ -107,21 +109,26 @@ pub struct ModelArm {
 //     }
 // }
 
-pub struct ArmAdc{
-    adc: stm32f4xx_hal::adc::Adc<ADC1>
+pub struct ArmAdc {
+    pub adc: stm32f4xx_hal::adc::Adc<ADC1>,
+    pub pin0: Pa4,
+    pub pin1: Pa5,
+    pub pin2: Pa6,
+    pub pin3: Pa7,
 }
 
 #[app(device = stm32f4::stm32f446, peripherals = true)]
 const APP: () = {
     struct Resources {
         arm: ModelArm,
+        arm_adc: ArmAdc,
         uart4: Uart4,
         // adc_pins: (Pa4, Pa5, Pa6, Pa7),
     }
 
     #[init]
-	fn init(context: init::Context) -> init::LateResources{
-		rtt_init_print!();
+    fn init(context: init::Context) -> init::LateResources {
+        rtt_init_print!();
 
         context
             .device
@@ -134,30 +141,30 @@ const APP: () = {
             w.dbg_stop().set_bit()
         });
 
-		let rcc = context.device.RCC.constrain();
-		let clocks = rcc.cfgr.freeze();
+        let rcc = context.device.RCC.constrain();
+        let clocks = rcc.cfgr.freeze();
         let gpioa = context.device.GPIOA.split();
         let gpioc = context.device.GPIOC.split();
 
         // Create a delay abstraction based on SysTick
         let mut _delay = Delay::new(context.core.SYST, clocks);
 
-		let uart4_channels = (
-			gpioc.pc10.into_alternate_af8(), // UART4_TX
-			gpioc.pc11.into_alternate_af8(), // UART4_RX
-		);
+        let uart4_channels = (
+            gpioc.pc10.into_alternate_af8(), // UART4_TX
+            gpioc.pc11.into_alternate_af8(), // UART4_RX
+        );
 
         let mut uart4 = serial::Serial::uart4(
-			context.device.UART4,
-			uart4_channels,
-			serial::config::Config {
-				baudrate: 9600.bps(),
-				wordlength: serial::config::WordLength::DataBits8,
-				parity: serial::config::Parity::ParityNone,
-				stopbits: serial::config::StopBits::STOP1,
-			},
-			clocks,
-		).unwrap();
+            context.device.UART4,
+            uart4_channels,
+            serial::config::Config {
+                baudrate: 9600.bps(),
+                wordlength: serial::config::WordLength::DataBits8,
+                parity: serial::config::Parity::ParityNone,
+                stopbits: serial::config::StopBits::STOP1,
+            },
+            clocks,
+        ).unwrap();
 
         // uart4.listen(serial::Event::Rxne);
 
@@ -166,21 +173,28 @@ const APP: () = {
         let config = AdcConfig::default()
             //Set the trigger you want
             .external_trigger(TriggerMode::RisingEdge, ExternalTrigger::Tim_1_cc_1);
-        let mut adc = Adc::adc1(context.device.ADC1, true, config);
-        let adc_pins= (
+        let adc = Adc::adc1(context.device.ADC1, true, config);
+        let adc_pins = (
             gpioa.pa4.into_analog(), // ADC pin for lower axis
             gpioa.pa5.into_analog(), // ADC pin for central axis
             gpioa.pa6.into_analog(), // ADC pin for upper axis
             gpioa.pa7.into_analog(), // ADC pin for rotation axis
         );
+        let mut arm_adc = ArmAdc {
+            adc,
+            pin0: adc_pins.0,
+            pin1: adc_pins.1,
+            pin2: adc_pins.2,
+            pin3: adc_pins.3,
+        };
 
-        adc.configure_channel(&adc_pins.0, Sequence::One, SampleTime::Cycles_112);
-        adc.configure_channel(&adc_pins.1, Sequence::One, SampleTime::Cycles_112);
-        adc.configure_channel(&adc_pins.2, Sequence::One, SampleTime::Cycles_112);
-        adc.configure_channel(&adc_pins.3, Sequence::One, SampleTime::Cycles_112);
+        arm_adc.adc.configure_channel(&arm_adc.pin0, Sequence::One, SampleTime::Cycles_112);
+        arm_adc.adc.configure_channel(&arm_adc.pin1, Sequence::One, SampleTime::Cycles_112);
+        arm_adc.adc.configure_channel(&arm_adc.pin2, Sequence::One, SampleTime::Cycles_112);
+        arm_adc.adc.configure_channel(&arm_adc.pin3, Sequence::One, SampleTime::Cycles_112);
 
         // Make sure it's enabled but don't start the conversion
-        adc.enable();
+        arm_adc.adc.enable();
 
         //Configure the timer
         let mut timer = timer::Timer::tim6(context.device.TIM6, 1.hz(), clocks);
@@ -190,31 +204,31 @@ const APP: () = {
         timer.listen(timer::Event::TimeOut);
 
 
-        let arm = ModelArm{
-            lower_axis: adc.convert(&adc_pins.0, SampleTime::Cycles_480),
-            central_axis: adc.convert(&adc_pins.1, SampleTime::Cycles_480),
-            upper_axis: adc.convert(&adc_pins.2, SampleTime::Cycles_480),
-            rotation_axis: adc.convert(&adc_pins.3, SampleTime::Cycles_480),
+        let arm = ModelArm {
+            lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480),
+            central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480),
+            upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480),
+            rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480),
         };
 
         init::LateResources {
             arm,
             uart4,
+            arm_adc,
             // adc_pins,
         }
-	}
+    }
 
-    #[task(binds = TIM6_DAC, resources = [arm], priority = 3)]
+    #[task(binds = TIM6_DAC, resources = [arm_adc, arm], priority = 3)]
     fn tim6_interrupt(context: tim6_interrupt::Context) {
-        context.resources.arm.lock(|cs| {
+        // context.resources.arm_adc.lock(|arm_adc_guard| {
+        // arm adc critical section
+        let v = context.resources.arm_adc.adc.convert(&mut context.resources.arm_adc.pin0, SampleTime::Cycles_480);
+        // if let Some(ref mut adc) = ADC.borrow(arm_adc_guard).borrow_mut().deref_mut() {
+        //     let sample = adc.convert(&pins, SampleTime::Cycles_480);
+        // rprintln!("{}", sample);
+        // }
 
-
-
-            if let Some(ref mut adc) = ADC.borrow(cs).borrow_mut().deref_mut() {
-                let sample = adc.convert(&pins, SampleTime::Cycles_480);
-                // rprintln!("{}", sample);
-            }
-        });
     }
 
     // #[task(binds = UART4, resources = [uart4, arm], priority = 1)]
