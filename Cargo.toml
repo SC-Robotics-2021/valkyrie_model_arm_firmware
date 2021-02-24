@@ -1,5 +1,5 @@
 [package]
-name = "LED_roulette"
+name = "kinematic_model_arm_firmware"
 version = "0.1.0"
 authors = ["Parham Sharafoleslami <parham2002sh@gmail.com>"]
 edition = "2018"
