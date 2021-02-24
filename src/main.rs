@@ -1,4 +1,4 @@
-// #![deny(unsafe_code)]
+#![deny(unsafe_code)]
 #![no_main]
 #![no_std]
 #![allow(unused_imports)]
@@ -7,33 +7,32 @@ mod protocol;
 
 // use panic_halt as _;
 use panic_rtt_target as _;
-// use cortex_m_rt::entry;
-use rtic::{app};
+use rtic::app;
 
 use core::ops::DerefMut;
 use cortex_m::interrupt::{free, Mutex};
 
 use heapless::{consts, Vec};
 use nb::block;
-use rtt_target::{rprintln, rtt_init_print};
 use postcard::{flavors, from_bytes_cobs, serialize_with_flavor, Error};
+use rtt_target::{rprintln, rtt_init_print};
 use serde::{Deserialize, Serialize};
 
-use stm32f4::stm32f446::{ADC1, TIM1};
-use stm32f4xx_hal::{gpio, prelude::*, serial, timer, adc::{
-    Adc,
-    config::AdcConfig,
-    config::SampleTime,
-    config::Sequence,
-    config::Eoc,
-    config::Scan,
-    config::Clock,
-    config::TriggerMode,
-    config::ExternalTrigger,
-}, stm32::interrupt, stm32};
+use rover_postcards::{KinematicArmPose, Request, RequestKind, Response, ResponseKind, Status};
 
-use crate::protocol::Response;
-use core::{cell::RefCell, borrow::{Borrow, BorrowMut}};
+use stm32f4::stm32f446::{ADC1};
+use stm32f4xx_hal::{
+    adc::{
+        config::{AdcConfig, Clock, Eoc, ExternalTrigger, SampleTime, Scan, Sequence, TriggerMode},
+        Adc,
+    },
+    gpio,
+    prelude::*,
+    serial, stm32,
+    stm32::interrupt,
+    timer,
+};
+
 
 type Uart4Tx = gpio::gpioc::PC10<gpio::Alternate<gpio::AF8>>;
 type Uart4Rx = gpio::gpioc::PC11<gpio::Alternate<gpio::AF8>>;
@@ -44,67 +43,18 @@ type Pa5 = gpio::gpioa::PA5<gpio::Analog>;
 type Pa6 = gpio::gpioa::PA6<gpio::Analog>;
 type Pa7 = gpio::gpioa::PA7<gpio::Analog>;
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-pub struct ModelArm {
-    pub lower_axis: u16,
-    pub central_axis: u16,
-    pub upper_axis: u16,
-    pub rotation_axis: u16,
+trait converting {
+    fn convert(&mut self);
 }
-
-// impl ModelArm {
-//     pub fn new() -> ModelArm
-//     {
-//         ModelArm {
-//             angle1: 0,
-//             angle2: 0,
-//             angle3: 0,
-//             angle4: 0,
-//         }
-//     }
-//
-//     pub fn convert_voltage(&self, adc: &mut Adc<ADC1>, adc_pins: &(Pa4, Pa5, Pa6, Pa7)) -> [u16; 4]
-//     {
-//             let voltages: [u16; 4] = [
-//                 adc.convert(&adc_pins.0, SampleTime::Cycles_480),
-//                 adc.convert(&adc_pins.1, SampleTime::Cycles_480),
-//                 adc.convert(&adc_pins.2, SampleTime::Cycles_480),
-//                 adc.convert(&adc_pins.3, SampleTime::Cycles_480),
-//             ];
-//
-//         voltages
-//     }
-//
-//     pub fn set_angles(&self, voltage: &[u16; 4]) -> [u16; 4]
-//     {
-//         let mut angles= [0; 4];
-//
-//         for (degree, volt) in angles.iter_mut().zip(voltage.iter())
-//         {
-//             let angle = (180_f32 / 3333_f32) * *volt as f32;
-//             let mut angle = angle as u16;
-//             if angle >= 180
-//             {
-//                 angle = 180;
-//             }
-//             *degree = angle;
-//         }
-//
-//         angles
-//     }
-//
-//     pub fn get_angles(&self, angles: [u16; 4]) -> ModelArm
-//     {
-//         ModelArm
-//         {
-//             angle1: angles[0],
-//             angle2: angles[1],
-//             angle3: angles[2],
-//             angle4: angles[3],
-//         }
-//     }
-// }
-
+impl converting for KinematicArmPose
+{
+     fn convert(&mut self) {
+        self.lower_axis = to_scale(self.lower_axis);
+        self.central_axis = to_scale(self.central_axis);
+        self.upper_axis = to_scale(self.upper_axis);
+        self.rotation_axis = to_scale(self.rotation_axis);
+    }
+}
 pub struct ArmAdc {
     pub adc: stm32f4xx_hal::adc::Adc<ADC1>,
     pub pin0: Pa4,
@@ -116,14 +66,16 @@ pub struct ArmAdc {
 #[app(device = stm32f4::stm32f446, peripherals = true)]
 const APP: () = {
     struct Resources {
-        arm: ModelArm,
+        arm_pose: KinematicArmPose,
         arm_adc: ArmAdc,
         uart4: Uart4,
+        rx_buffer: cobs_stream::CobsDecoder,
     }
 
     #[init]
     fn init(context: init::Context) -> init::LateResources {
         rtt_init_print!();
+        rprintln!("Hello world!");
 
         context
             .device
@@ -157,7 +109,8 @@ const APP: () = {
                 stopbits: serial::config::StopBits::STOP1,
             },
             clocks,
-        ).unwrap();
+        )
+            .unwrap();
         uart4.listen(serial::Event::Rxne);
         // Hello world!
         for byte in b"hello from STM32!".iter() {
@@ -184,10 +137,18 @@ const APP: () = {
             pin3: adc_pins.3,
         };
 
-        arm_adc.adc.configure_channel(&arm_adc.pin0, Sequence::One, SampleTime::Cycles_112);
-        arm_adc.adc.configure_channel(&arm_adc.pin1, Sequence::One, SampleTime::Cycles_112);
-        arm_adc.adc.configure_channel(&arm_adc.pin2, Sequence::One, SampleTime::Cycles_112);
-        arm_adc.adc.configure_channel(&arm_adc.pin3, Sequence::One, SampleTime::Cycles_112);
+        arm_adc
+            .adc
+            .configure_channel(&arm_adc.pin0, Sequence::One, SampleTime::Cycles_112);
+        arm_adc
+            .adc
+            .configure_channel(&arm_adc.pin1, Sequence::One, SampleTime::Cycles_112);
+        arm_adc
+            .adc
+            .configure_channel(&arm_adc.pin2, Sequence::One, SampleTime::Cycles_112);
+        arm_adc
+            .adc
+            .configure_channel(&arm_adc.pin3, Sequence::One, SampleTime::Cycles_112);
 
         // Make sure it's enabled but don't start the conversion
         arm_adc.adc.enable();
@@ -199,48 +160,147 @@ const APP: () = {
         // and be sure to listen for its ticks.
         timer.listen(timer::Event::TimeOut);
 
-
-        let mut arm = ModelArm {
+        let arm_pose = KinematicArmPose {
             lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480),
             central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480),
             upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480),
             rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480),
         };
 
+        let mut rx_buffer = cobs_stream::CobsDecoder::new(cobs_stream::Buffer::new());
+        rx_buffer
+            .reset()
+            .expect("Initialization of the RX buffer failed. this shouldn't happen.");
+
         init::LateResources {
-            arm,
+            arm_pose,
             uart4,
             arm_adc,
+            rx_buffer,
         }
     }
 
-    #[task(binds = TIM6_DAC, resources = [arm_adc, arm], priority = 3)]
+    #[task(binds = TIM6_DAC, resources = [arm_adc, arm_pose], priority = 3)]
     fn tim6_interrupt(context: tim6_interrupt::Context) {
         // arm adc critical section
-        let mut arm_ptr = context.resources.arm;
-        let mut arm_adc_ptr = context.resources.arm_adc;
+        let mut arm_ptr = context.resources.arm_pose;
+        let arm_adc_ptr = context.resources.arm_adc;
         arm_ptr.lock(|arm_ptr| {
-            arm_ptr.lower_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
-            arm_ptr.central_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin1, SampleTime::Cycles_480);
-            arm_ptr.upper_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin2, SampleTime::Cycles_480);
-            arm_ptr.rotation_axis = arm_adc_ptr.adc.convert(&mut arm_adc_ptr.pin3, SampleTime::Cycles_480);
+            let lower = arm_adc_ptr
+                .adc
+                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+            let center = arm_adc_ptr
+                .adc
+                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+            let upper = arm_adc_ptr
+                .adc
+                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+            let rotation = arm_adc_ptr
+                .adc
+                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+
+            arm_ptr.lower_axis = arm_adc_ptr
+                .adc
+                .sample_to_millivolts(lower).into();
+            arm_ptr.central_axis = arm_adc_ptr
+                .adc
+                .sample_to_millivolts(center).into();
+            arm_ptr.upper_axis = arm_adc_ptr
+                .adc
+                .sample_to_millivolts(upper).into();
+            arm_ptr.rotation_axis = arm_adc_ptr
+                .adc
+                .sample_to_millivolts(rotation).into();
+
+            arm_ptr.convert();
             // rprintln!("{:?}", arm_adc_ptr.adc.sample_to_millivolts(arm_ptr.lower_axis));
         });
     }
 
-    #[task(binds = UART4, resources = [uart4, arm], priority = 10)]
-    fn uart4_on_rxne (context: uart4_on_rxne::Context){
-        let response =
-            protocol::Response {
-                status: protocol::Status::OK,
-                data: Some(postcard::to_vec(context.resources.arm).unwrap())
-            };
-        rprintln!("{:?}", response);
-        let buf: heapless::Vec<u8, heapless::consts::U1024> =
-            postcard::to_vec_cobs(&response).unwrap();
-        for byte in buf.iter() {
-            block!(context.resources.uart4.write(*byte)).unwrap()
-        }
+    #[task(binds = UART4, resources = [uart4, arm_pose, rx_buffer], priority = 10)]
+    fn uart4_on_rxne(mut context: uart4_on_rxne::Context) {
+        let connection: &mut Uart4 = context.resources.uart4;
+        match connection.read() {
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                rprintln!("Failed to read byte {:?}... discarding buffer.", e);
+            }
+            Ok(rx_byte) => {
+                let decoder: &mut cobs_stream::CobsDecoder = &mut context.resources.rx_buffer;
+                #[cfg(debug_assertions)]
+                rprintln!("feeding byte {:?} ", rx_byte);
+                match decoder.feed(rx_byte) {
+                    Ok(None) => {} // needs more bytes, nothing to do.
+                    Err(e) => {
+                        #[cfg(debug_assertions)]
+                        rprintln!("Decoding failure := {:?} !", e);
+                        let response = rover_postcards::Response {
+                            status: rover_postcards::Status::DecodeError,
+                            state: -1,
+                            data: None,
+                        };
+                        let buf: heapless::Vec<u8, heapless::consts::U32> =
+                            postcard::to_vec_cobs(&response).unwrap();
+                        for byte in buf.iter() {
+                            block!(context.resources.uart4.write(*byte)).unwrap()
+                        }
+                    }
+                    Ok(Some(_)) => {
+                        let request: postcard::Result<rover_postcards::Request> =
+                            postcard::from_bytes(&decoder.dest);
 
+                        #[cfg(debug_assertions)]
+                        rprintln!("recv'ed request {:?}", request);
+                        match request {
+                            Err(_) => {
+                                let response = rover_postcards::Response {
+                                    status: rover_postcards::Status::DecodeError,
+                                    state: -1,
+                                    data: None,
+                                };
+                                let buf: heapless::Vec<u8, heapless::consts::U32> =
+                                    postcard::to_vec_cobs(&response).unwrap();
+                                for byte in buf.iter() {
+                                    block!(connection.write(*byte)).unwrap()
+                                }
+                            }
+                            Ok(request) => {
+                                let response = match request.kind {
+                                    rover_postcards::RequestKind::GetKinematicArmPose => {
+                                        rover_postcards::Response {
+                                            status: rover_postcards::Status::OK,
+                                            state: request.state,
+                                            data: Some(ResponseKind::KinematicArmPose(
+                                                *context.resources.arm_pose,
+                                            )),
+                                        }
+                                    }
+
+                                    _ => Response {
+                                        status: rover_postcards::Status::Unimplemented,
+                                        state: request.state,
+                                        data: None,
+                                    },
+                                };
+
+                                #[cfg(debug_assertions)]
+                                rprintln!("writing response: {:?}", response);
+                                let buf: heapless::Vec<u8, heapless::consts::U1024> =
+                                    postcard::to_vec_cobs(&response).unwrap();
+                                for byte in buf.iter() {
+                                    block!(context.resources.uart4.write(*byte)).unwrap()
+                                }
+                            }
+                        }
+
+                        decoder.reset().expect("failed to reset stream decoder...");
+                    }
+                }
+            }
+        }
     }
 };
+
+pub fn to_scale(value: f32) -> f32 {
+    2.0/3335.0 * value - 1.0
+}
