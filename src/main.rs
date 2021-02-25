@@ -3,7 +3,6 @@
 #![no_std]
 #![allow(unused_imports)]
 
-mod protocol;
 
 // use panic_halt as _;
 use panic_rtt_target as _;
@@ -74,14 +73,23 @@ const APP: () = {
 
     #[init]
     fn init(context: init::Context) -> init::LateResources {
+        #[cfg(debug_assertions)]
         rtt_init_print!();
-        rprintln!("Hello world!");
 
+        #[cfg(debug_assertions)]
+        rprintln!("hello, world!");
+        /*
+            This patch enables the debugger to behave correctly during a WFI
+            See Errata: https://www.st.com/content/ccc/resource/technical/document/errata_sheet/c3/6b/f8/32/fc/01/48/6e/DM00155929.pdf/files/DM00155929.pdf/jcr:content/translations/en.DM00155929.pdf#%5B%7B%22num%22%3A37%2C%22gen%22%3A0%7D%2C%7B%22name%22%3A%22XYZ%22%7D%2C67%2C724%2Cnull%5D
+            See Also Github: https://github.com/probe-rs/probe-rs/issues/350#issuecomment-740550519
+        */
+        // enable the dma1 master
         context
             .device
             .RCC
             .ahb1enr
             .modify(|_, w| w.dma1en().enabled());
+        // enable the debugger.
         context.device.DBGMCU.cr.modify(|_, w| {
             w.dbg_sleep().set_bit();
             w.dbg_standby().set_bit();
@@ -154,17 +162,18 @@ const APP: () = {
         arm_adc.adc.enable();
 
         //Configure the timer
-        let mut timer = timer::Timer::tim6(context.device.TIM6, 1.hz(), clocks);
+        // This timer is used for the ADC processing tick.
+        let mut timer = timer::Timer::tim1(context.device.TIM1, 1.hz(), clocks);
 
         // create a periodic timer to check the encoders periodically
         // and be sure to listen for its ticks.
         timer.listen(timer::Event::TimeOut);
 
         let arm_pose = KinematicArmPose {
-            lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480),
-            central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480),
-            upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480),
-            rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480),
+            lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480) as f32,
+            central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480) as f32,
+            upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480) as f32,
+            rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480) as f32,
         };
 
         let mut rx_buffer = cobs_stream::CobsDecoder::new(cobs_stream::Buffer::new());
@@ -180,7 +189,7 @@ const APP: () = {
         }
     }
 
-    #[task(binds = TIM6_DAC, resources = [arm_adc, arm_pose], priority = 3)]
+    #[task(binds = TIM1_TRG_COM_TIM11, resources = [arm_adc, arm_pose], priority = 3)]
     fn tim6_interrupt(context: tim6_interrupt::Context) {
         // arm adc critical section
         let mut arm_ptr = context.resources.arm_pose;
@@ -220,13 +229,27 @@ const APP: () = {
     #[task(binds = UART4, resources = [uart4, arm_pose, rx_buffer], priority = 10)]
     fn uart4_on_rxne(mut context: uart4_on_rxne::Context) {
         let connection: &mut Uart4 = context.resources.uart4;
+        let decoder: &mut cobs_stream::CobsDecoder = &mut context.resources.rx_buffer;
+
         match connection.read() {
             Err(e) => {
                 #[cfg(debug_assertions)]
-                rprintln!("Failed to read byte {:?}... discarding buffer.", e);
+                rprintln!("Failed to read byte due to {:?}... discarding buffer.", e);
+                decoder.reset().expect("failed to reset stream decoder...");
+
+                let response = rover_postcards::Response {
+                    status: rover_postcards::Status::DecodeError,
+                    state: -1,
+                    data: None,
+                };
+                let buf: heapless::Vec<u8, heapless::consts::U32> =
+                    postcard::to_vec_cobs(&response).unwrap();
+                for byte in buf.iter() {
+                    block!(context.resources.uart4.write(*byte)).unwrap();
+                }
+
             }
             Ok(rx_byte) => {
-                let decoder: &mut cobs_stream::CobsDecoder = &mut context.resources.rx_buffer;
                 #[cfg(debug_assertions)]
                 rprintln!("feeding byte {:?} ", rx_byte);
                 match decoder.feed(rx_byte) {
