@@ -170,10 +170,10 @@ const APP: () = {
         timer.listen(timer::Event::TimeOut);
 
         let arm_pose = KinematicArmPose {
-            lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480),
-            central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480),
-            upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480),
-            rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480),
+            lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480) as f32,
+            central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480) as f32,
+            upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480) as f32,
+            rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480) as f32,
         };
 
         let mut rx_buffer = cobs_stream::CobsDecoder::new(cobs_stream::Buffer::new());
@@ -210,18 +210,18 @@ const APP: () = {
 
             arm_ptr.lower_axis = arm_adc_ptr
                 .adc
-                .sample_to_millivolts(lower).into() as f32;
+                .sample_to_millivolts(lower).into();
             arm_ptr.central_axis = arm_adc_ptr
                 .adc
-                .sample_to_millivolts(center).into() as f32;
+                .sample_to_millivolts(center).into();
             arm_ptr.upper_axis = arm_adc_ptr
                 .adc
-                .sample_to_millivolts(upper).into() as f32;
+                .sample_to_millivolts(upper).into();
             arm_ptr.rotation_axis = arm_adc_ptr
                 .adc
                 .sample_to_millivolts(rotation).into();
 
-            arm_ptr.convert() as f32;
+            arm_ptr.convert();
             // rprintln!("{:?}", arm_adc_ptr.adc.sample_to_millivolts(arm_ptr.lower_axis));
         });
     }
