@@ -48,10 +48,10 @@ trait converting {
 impl converting for KinematicArmPose
 {
      fn convert(&mut self) {
-        self.lower_axis = to_scale(self.lower_axis);
-        self.central_axis = to_scale(self.central_axis);
-        self.upper_axis = to_scale(self.upper_axis);
-        self.rotation_axis = to_scale(self.rotation_axis);
+        self.lower_axis = Some(to_scale(self.lower_axis.unwrap_or(0.0)));
+        self.pitch_axis = Some(to_scale(self.pitch_axis.unwrap_or(0.0)));
+        self.upper_axis = Some(to_scale(self.upper_axis.unwrap_or(0.0)));
+        self.rotation_axis = Some(to_scale(self.rotation_axis.unwrap_or(0.0)));
     }
 }
 pub struct ArmAdc {
@@ -172,10 +172,11 @@ const APP: () = {
         timer.listen(timer::Event::TimeOut);
 
         let arm_pose = KinematicArmPose {
-            lower_axis: arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480) as f32,
-            central_axis: arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480) as f32,
-            upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480) as f32,
-            rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480) as f32,
+            lower_axis: Some(arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480) as f32),
+            pitch_axis: Some(arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480) as f32),
+            upper_axis: Some(arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480) as f32),
+            rotation_axis: Some(arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480) as f32),
+            grip_axis: None
         };
         rprintln!("init RX buffer...");
 
@@ -212,18 +213,18 @@ const APP: () = {
                 .adc
                 .convert(&mut arm_adc_ptr.pin3, SampleTime::Cycles_480);
 
-            arm_ptr.lower_axis = arm_adc_ptr
+            arm_ptr.lower_axis = Some(arm_adc_ptr
                 .adc
-                .sample_to_millivolts(lower).into();
-            arm_ptr.central_axis = arm_adc_ptr
+                .sample_to_millivolts(lower).into());
+            arm_ptr.pitch_axis = Some(arm_adc_ptr
                 .adc
-                .sample_to_millivolts(center).into();
-            arm_ptr.upper_axis = arm_adc_ptr
+                .sample_to_millivolts(center).into());
+            arm_ptr.upper_axis = Some(arm_adc_ptr
                 .adc
-                .sample_to_millivolts(upper).into();
-            arm_ptr.rotation_axis = arm_adc_ptr
+                .sample_to_millivolts(upper).into());
+            arm_ptr.rotation_axis = Some(arm_adc_ptr
                 .adc
-                .sample_to_millivolts(rotation).into();
+                .sample_to_millivolts(rotation).into());
             // #[cfg(debug_assertions)]
             // rprintln!("[pre-convert] observed state := {:?}", arm_ptr);
             arm_ptr.convert();
