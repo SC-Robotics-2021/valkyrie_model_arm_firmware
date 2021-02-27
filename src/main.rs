@@ -129,7 +129,9 @@ const APP: () = {
 
         let config = AdcConfig::default()
             //Set the trigger you want
-            .external_trigger(TriggerMode::RisingEdge, ExternalTrigger::Tim_1_cc_1);
+            .external_trigger(TriggerMode::RisingEdge, ExternalTrigger::Tim_1_cc_1)
+            .continuous(stm32f4xx_hal::adc::config::Continuous::Continuous)
+            ;
         let adc = Adc::adc1(context.device.ADC1, true, config);
         let adc_pins = (
             gpioa.pa4.into_analog(), // ADC pin for lower axis
@@ -150,13 +152,13 @@ const APP: () = {
             .configure_channel(&arm_adc.pin0, Sequence::One, SampleTime::Cycles_112);
         arm_adc
             .adc
-            .configure_channel(&arm_adc.pin1, Sequence::One, SampleTime::Cycles_112);
+            .configure_channel(&arm_adc.pin1, Sequence::Two, SampleTime::Cycles_112);
         arm_adc
             .adc
-            .configure_channel(&arm_adc.pin2, Sequence::One, SampleTime::Cycles_112);
+            .configure_channel(&arm_adc.pin2, Sequence::Three, SampleTime::Cycles_112);
         arm_adc
             .adc
-            .configure_channel(&arm_adc.pin3, Sequence::One, SampleTime::Cycles_112);
+            .configure_channel(&arm_adc.pin3, Sequence::Four, SampleTime::Cycles_112);
 
         // Make sure it's enabled but don't start the conversion
         arm_adc.adc.enable();
@@ -175,12 +177,13 @@ const APP: () = {
             upper_axis: arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480) as f32,
             rotation_axis: arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480) as f32,
         };
+        rprintln!("init RX buffer...");
 
         let mut rx_buffer = cobs_stream::CobsDecoder::new(cobs_stream::Buffer::new());
         rx_buffer
             .reset()
             .expect("Initialization of the RX buffer failed. this shouldn't happen.");
-
+        rprintln!("returning late resources...");
         init::LateResources {
             arm_pose,
             uart4,
@@ -189,24 +192,25 @@ const APP: () = {
         }
     }
 
-    #[task(binds = TIM1_TRG_COM_TIM11, resources = [arm_adc, arm_pose], priority = 3)]
+    #[task(binds = TIM1_UP_TIM10, resources = [arm_adc, arm_pose], priority = 3)]
     fn tim6_interrupt(context: tim6_interrupt::Context) {
         // arm adc critical section
         let mut arm_ptr = context.resources.arm_pose;
-        let arm_adc_ptr = context.resources.arm_adc;
+        let arm_adc_ptr= context.resources.arm_adc;
+        // arm_adc_ptr.sample_to_millivolts(arm_adc_ptr.read()
         arm_ptr.lock(|arm_ptr| {
             let lower = arm_adc_ptr
                 .adc
                 .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
             let center = arm_adc_ptr
                 .adc
-                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+                .convert(&mut arm_adc_ptr.pin1, SampleTime::Cycles_480);
             let upper = arm_adc_ptr
                 .adc
-                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+                .convert(&mut arm_adc_ptr.pin2, SampleTime::Cycles_480);
             let rotation = arm_adc_ptr
                 .adc
-                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+                .convert(&mut arm_adc_ptr.pin3, SampleTime::Cycles_480);
 
             arm_ptr.lower_axis = arm_adc_ptr
                 .adc
@@ -220,8 +224,12 @@ const APP: () = {
             arm_ptr.rotation_axis = arm_adc_ptr
                 .adc
                 .sample_to_millivolts(rotation).into();
-
+            // #[cfg(debug_assertions)]
+            // rprintln!("[pre-convert] observed state := {:?}", arm_ptr);
             arm_ptr.convert();
+
+            #[cfg(debug_assertions)]
+            rprintln!("observed state := {:?}", arm_ptr);
             // rprintln!("{:?}", arm_adc_ptr.adc.sample_to_millivolts(arm_ptr.lower_axis));
         });
     }
