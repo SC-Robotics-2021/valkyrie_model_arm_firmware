@@ -31,6 +31,7 @@ use stm32f4xx_hal::{
     stm32::interrupt,
     timer,
 };
+use rover_postcards::arm::GripperPose;
 
 
 type Uart4Tx = gpio::gpioc::PC10<gpio::Alternate<gpio::AF8>>;
@@ -45,15 +46,17 @@ type Pa7 = gpio::gpioa::PA7<gpio::Analog>;
 trait converting {
     fn convert(&mut self);
 }
+
 impl converting for KinematicArmPose
 {
-     fn convert(&mut self) {
+    fn convert(&mut self) {
         self.lower_axis = Some(to_scale(self.lower_axis.unwrap_or(0.0)));
-        self.pitch_axis = Some(to_scale(self.pitch_axis.unwrap_or(0.0)));
+        self.grip.pitch_axis = Some(to_scale(self.grip.pitch_axis.unwrap_or(0.0)));
         self.upper_axis = Some(to_scale(self.upper_axis.unwrap_or(0.0)));
         self.rotation_axis = Some(to_scale(self.rotation_axis.unwrap_or(0.0)));
     }
 }
+
 pub struct ArmAdc {
     pub adc: stm32f4xx_hal::adc::Adc<ADC1>,
     pub pin0: Pa4,
@@ -170,169 +173,172 @@ const APP: () = {
         // create a periodic timer to check the encoders periodically
         // and be sure to listen for its ticks.
         timer.listen(timer::Event::TimeOut);
-
         let arm_pose = KinematicArmPose {
             lower_axis: Some(arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480) as f32),
-            pitch_axis: Some(arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480) as f32),
             upper_axis: Some(arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480) as f32),
             rotation_axis: Some(arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480) as f32),
-            grip_axis: None
+            grip: GripperPose {
+                rotation_axis: None,
+                gripper_axis: None,
+                pitch_axis: Some(arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480) as f32),
+
+            },
         };
-        rprintln!("init RX buffer...");
 
-        let mut rx_buffer = cobs_stream::CobsDecoder::new(cobs_stream::Buffer::new());
-        rx_buffer
-            .reset()
-            .expect("Initialization of the RX buffer failed. this shouldn't happen.");
-        rprintln!("returning late resources...");
-        init::LateResources {
-            arm_pose,
-            uart4,
-            arm_adc,
-            rx_buffer,
-        }
+    rprintln!("init RX buffer...");
+
+    let mut rx_buffer = cobs_stream::CobsDecoder::new(cobs_stream::Buffer::new());
+    rx_buffer
+        .reset()
+        .expect("Initialization of the RX buffer failed. this shouldn't happen.");
+    rprintln!("returning late resources...");
+    init::LateResources {
+        arm_pose,
+        uart4,
+        arm_adc,
+        rx_buffer,
     }
+}
 
-    #[task(binds = TIM1_UP_TIM10, resources = [arm_adc, arm_pose], priority = 3)]
-    fn tim6_interrupt(context: tim6_interrupt::Context) {
-        // arm adc critical section
-        let mut arm_ptr = context.resources.arm_pose;
-        let arm_adc_ptr= context.resources.arm_adc;
-        // arm_adc_ptr.sample_to_millivolts(arm_adc_ptr.read()
-        arm_ptr.lock(|arm_ptr| {
-            let lower = arm_adc_ptr
-                .adc
-                .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
-            let center = arm_adc_ptr
-                .adc
-                .convert(&mut arm_adc_ptr.pin1, SampleTime::Cycles_480);
-            let upper = arm_adc_ptr
-                .adc
-                .convert(&mut arm_adc_ptr.pin2, SampleTime::Cycles_480);
-            let rotation = arm_adc_ptr
-                .adc
-                .convert(&mut arm_adc_ptr.pin3, SampleTime::Cycles_480);
+#[task(binds = TIM1_UP_TIM10, resources = [arm_adc, arm_pose], priority = 3)]
+fn tim6_interrupt(context: tim6_interrupt::Context) {
+    // arm adc critical section
+    let mut arm_ptr = context.resources.arm_pose;
+    let arm_adc_ptr = context.resources.arm_adc;
+    // arm_adc_ptr.sample_to_millivolts(arm_adc_ptr.read()
+    arm_ptr.lock(|arm_ptr| {
+        let lower = arm_adc_ptr
+            .adc
+            .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+        let center = arm_adc_ptr
+            .adc
+            .convert(&mut arm_adc_ptr.pin1, SampleTime::Cycles_480);
+        let upper = arm_adc_ptr
+            .adc
+            .convert(&mut arm_adc_ptr.pin2, SampleTime::Cycles_480);
+        let rotation = arm_adc_ptr
+            .adc
+            .convert(&mut arm_adc_ptr.pin3, SampleTime::Cycles_480);
 
-            arm_ptr.lower_axis = Some(arm_adc_ptr
-                .adc
-                .sample_to_millivolts(lower).into());
-            arm_ptr.pitch_axis = Some(arm_adc_ptr
-                .adc
-                .sample_to_millivolts(center).into());
-            arm_ptr.upper_axis = Some(arm_adc_ptr
-                .adc
-                .sample_to_millivolts(upper).into());
-            arm_ptr.rotation_axis = Some(arm_adc_ptr
-                .adc
-                .sample_to_millivolts(rotation).into());
-            // #[cfg(debug_assertions)]
-            // rprintln!("[pre-convert] observed state := {:?}", arm_ptr);
-            arm_ptr.convert();
+        arm_ptr.lower_axis = Some(arm_adc_ptr
+            .adc
+            .sample_to_millivolts(lower).into());
+        arm_ptr.grip.pitch_axis = Some(arm_adc_ptr
+            .adc
+            .sample_to_millivolts(center).into());
+        arm_ptr.upper_axis = Some(arm_adc_ptr
+            .adc
+            .sample_to_millivolts(upper).into());
+        arm_ptr.rotation_axis = Some(arm_adc_ptr
+            .adc
+            .sample_to_millivolts(rotation).into());
+        // #[cfg(debug_assertions)]
+        // rprintln!("[pre-convert] observed state := {:?}", arm_ptr);
+        arm_ptr.convert();
 
+        #[cfg(debug_assertions)]
+        rprintln!("observed state := {:?}", arm_ptr);
+        // rprintln!("{:?}", arm_adc_ptr.adc.sample_to_millivolts(arm_ptr.lower_axis));
+    });
+}
+
+#[task(binds = UART4, resources = [uart4, arm_pose, rx_buffer], priority = 10)]
+fn uart4_on_rxne(mut context: uart4_on_rxne::Context) {
+    let connection: &mut Uart4 = context.resources.uart4;
+    let decoder: &mut cobs_stream::CobsDecoder = &mut context.resources.rx_buffer;
+
+    match connection.read() {
+        Err(e) => {
             #[cfg(debug_assertions)]
-            rprintln!("observed state := {:?}", arm_ptr);
-            // rprintln!("{:?}", arm_adc_ptr.adc.sample_to_millivolts(arm_ptr.lower_axis));
-        });
-    }
+            rprintln!("Failed to read byte due to {:?}... discarding buffer.", e);
+            decoder.reset().expect("failed to reset stream decoder...");
 
-    #[task(binds = UART4, resources = [uart4, arm_pose, rx_buffer], priority = 10)]
-    fn uart4_on_rxne(mut context: uart4_on_rxne::Context) {
-        let connection: &mut Uart4 = context.resources.uart4;
-        let decoder: &mut cobs_stream::CobsDecoder = &mut context.resources.rx_buffer;
-
-        match connection.read() {
-            Err(e) => {
-                #[cfg(debug_assertions)]
-                rprintln!("Failed to read byte due to {:?}... discarding buffer.", e);
-                decoder.reset().expect("failed to reset stream decoder...");
-
-                let response = rover_postcards::Response {
-                    status: rover_postcards::Status::DecodeError,
-                    state: -1,
-                    data: None,
-                };
-                let buf: heapless::Vec<u8, heapless::consts::U32> =
-                    postcard::to_vec_cobs(&response).unwrap();
-                for byte in buf.iter() {
-                    block!(context.resources.uart4.write(*byte)).unwrap();
-                }
-
+            let response = rover_postcards::Response {
+                status: rover_postcards::Status::DecodeError,
+                state: -1,
+                data: None,
+            };
+            let buf: heapless::Vec<u8, heapless::consts::U32> =
+                postcard::to_vec_cobs(&response).unwrap();
+            for byte in buf.iter() {
+                block!(context.resources.uart4.write(*byte)).unwrap();
             }
-            Ok(rx_byte) => {
-                #[cfg(debug_assertions)]
-                rprintln!("feeding byte {:?} ", rx_byte);
-                match decoder.feed(rx_byte) {
-                    Ok(None) => {} // needs more bytes, nothing to do.
-                    Err(e) => {
-                        #[cfg(debug_assertions)]
-                        rprintln!("Decoding failure := {:?} !", e);
-                        let response = rover_postcards::Response {
-                            status: rover_postcards::Status::DecodeError,
-                            state: -1,
-                            data: None,
-                        };
-                        let buf: heapless::Vec<u8, heapless::consts::U32> =
-                            postcard::to_vec_cobs(&response).unwrap();
-                        for byte in buf.iter() {
-                            block!(context.resources.uart4.write(*byte)).unwrap()
-                        }
+        }
+        Ok(rx_byte) => {
+            #[cfg(debug_assertions)]
+            rprintln!("feeding byte {:?} ", rx_byte);
+            match decoder.feed(rx_byte) {
+                Ok(None) => {} // needs more bytes, nothing to do.
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    rprintln!("Decoding failure := {:?} !", e);
+                    let response = rover_postcards::Response {
+                        status: rover_postcards::Status::DecodeError,
+                        state: -1,
+                        data: None,
+                    };
+                    let buf: heapless::Vec<u8, heapless::consts::U32> =
+                        postcard::to_vec_cobs(&response).unwrap();
+                    for byte in buf.iter() {
+                        block!(context.resources.uart4.write(*byte)).unwrap()
                     }
-                    Ok(Some(_)) => {
-                        let request: postcard::Result<rover_postcards::Request> =
-                            postcard::from_bytes(&decoder.dest);
+                }
+                Ok(Some(_)) => {
+                    let request: postcard::Result<rover_postcards::Request> =
+                        postcard::from_bytes(&decoder.dest);
 
-                        #[cfg(debug_assertions)]
-                        rprintln!("recv'ed request {:?}", request);
-                        match request {
-                            Err(_) => {
-                                let response = rover_postcards::Response {
-                                    status: rover_postcards::Status::DecodeError,
-                                    state: -1,
-                                    data: None,
-                                };
-                                let buf: heapless::Vec<u8, heapless::consts::U32> =
-                                    postcard::to_vec_cobs(&response).unwrap();
-                                for byte in buf.iter() {
-                                    block!(connection.write(*byte)).unwrap()
-                                }
+                    #[cfg(debug_assertions)]
+                    rprintln!("recv'ed request {:?}", request);
+                    match request {
+                        Err(_) => {
+                            let response = rover_postcards::Response {
+                                status: rover_postcards::Status::DecodeError,
+                                state: -1,
+                                data: None,
+                            };
+                            let buf: heapless::Vec<u8, heapless::consts::U32> =
+                                postcard::to_vec_cobs(&response).unwrap();
+                            for byte in buf.iter() {
+                                block!(connection.write(*byte)).unwrap()
                             }
-                            Ok(request) => {
-                                let response = match request.kind {
-                                    rover_postcards::RequestKind::GetKinematicArmPose => {
-                                        rover_postcards::Response {
-                                            status: rover_postcards::Status::OK,
-                                            state: request.state,
-                                            data: Some(ResponseKind::KinematicArmPose(
-                                                *context.resources.arm_pose,
-                                            )),
-                                        }
-                                    }
-
-                                    _ => Response {
-                                        status: rover_postcards::Status::Unimplemented,
+                        }
+                        Ok(request) => {
+                            let response = match request.kind {
+                                rover_postcards::RequestKind::GetKinematicArmPose => {
+                                    rover_postcards::Response {
+                                        status: rover_postcards::Status::OK,
                                         state: request.state,
-                                        data: None,
-                                    },
-                                };
-
-                                #[cfg(debug_assertions)]
-                                rprintln!("writing response: {:?}", response);
-                                let buf: heapless::Vec<u8, heapless::consts::U1024> =
-                                    postcard::to_vec_cobs(&response).unwrap();
-                                for byte in buf.iter() {
-                                    block!(context.resources.uart4.write(*byte)).unwrap()
+                                        data: Some(ResponseKind::KinematicArmPose(
+                                            *context.resources.arm_pose,
+                                        )),
+                                    }
                                 }
+
+                                _ => Response {
+                                    status: rover_postcards::Status::Unimplemented,
+                                    state: request.state,
+                                    data: None,
+                                },
+                            };
+
+                            #[cfg(debug_assertions)]
+                            rprintln!("writing response: {:?}", response);
+                            let buf: heapless::Vec<u8, heapless::consts::U1024> =
+                                postcard::to_vec_cobs(&response).unwrap();
+                            for byte in buf.iter() {
+                                block!(context.resources.uart4.write(*byte)).unwrap()
                             }
                         }
-
-                        decoder.reset().expect("failed to reset stream decoder...");
                     }
+
+                    decoder.reset().expect("failed to reset stream decoder...");
                 }
             }
         }
     }
+}
 };
 
 pub fn to_scale(value: f32) -> f32 {
-    2.0/3335.0 * value - 1.0
+2.0 / 3335.0 * value - 1.0
 }
