@@ -4,6 +4,8 @@
 #![allow(unused_imports)]
 
 
+mod scale;
+
 // use panic_halt as _;
 use panic_rtt_target as _;
 use rtic::app;
@@ -43,26 +45,14 @@ type Pa5 = gpio::gpioa::PA5<gpio::Analog>;
 type Pa6 = gpio::gpioa::PA6<gpio::Analog>;
 type Pa7 = gpio::gpioa::PA7<gpio::Analog>;
 
-trait converting {
-    fn convert(&mut self);
-}
-
-impl converting for KinematicArmPose
-{
-    fn convert(&mut self) {
-        self.lower_axis = Some(to_scale(self.lower_axis.unwrap_or(0.0)));
-        self.grip.pitch_axis = Some(to_scale(self.grip.pitch_axis.unwrap_or(0.0)));
-        self.upper_axis = Some(to_scale(self.upper_axis.unwrap_or(0.0)));
-        self.rotation_axis = Some(to_scale(self.rotation_axis.unwrap_or(0.0)));
-    }
-}
+use crate::scale::{AZIMUTH_AXIS_TUNING, LOWER_ARM_TUNING, UPPER_ARM_TUNING};
 
 pub struct ArmAdc {
     pub adc: stm32f4xx_hal::adc::Adc<ADC1>,
-    pub pin0: Pa4,
-    pub pin1: Pa5,
-    pub pin2: Pa6,
-    pub pin3: Pa7,
+    pub pa4: Pa4,
+    pub pa5: Pa5,
+    pub pa6: Pa6,
+    pub pa7: Pa7,
 }
 
 #[app(device = stm32f4::stm32f446, peripherals = true)]
@@ -144,24 +134,24 @@ const APP: () = {
         );
         let mut arm_adc = ArmAdc {
             adc,
-            pin0: adc_pins.0,
-            pin1: adc_pins.1,
-            pin2: adc_pins.2,
-            pin3: adc_pins.3,
+            pa4: adc_pins.0,
+            pa5: adc_pins.1,
+            pa6: adc_pins.2,
+            pa7: adc_pins.3,
         };
 
         arm_adc
             .adc
-            .configure_channel(&arm_adc.pin0, Sequence::One, SampleTime::Cycles_112);
+            .configure_channel(&arm_adc.pa4, Sequence::One, SampleTime::Cycles_112);
         arm_adc
             .adc
-            .configure_channel(&arm_adc.pin1, Sequence::Two, SampleTime::Cycles_112);
+            .configure_channel(&arm_adc.pa5, Sequence::Two, SampleTime::Cycles_112);
         arm_adc
             .adc
-            .configure_channel(&arm_adc.pin2, Sequence::Three, SampleTime::Cycles_112);
+            .configure_channel(&arm_adc.pa6, Sequence::Three, SampleTime::Cycles_112);
         arm_adc
             .adc
-            .configure_channel(&arm_adc.pin3, Sequence::Four, SampleTime::Cycles_112);
+            .configure_channel(&arm_adc.pa7, Sequence::Four, SampleTime::Cycles_112);
 
         // Make sure it's enabled but don't start the conversion
         arm_adc.adc.enable();
@@ -174,13 +164,13 @@ const APP: () = {
         // and be sure to listen for its ticks.
         timer.listen(timer::Event::TimeOut);
         let arm_pose = KinematicArmPose {
-            lower_axis: Some(arm_adc.adc.convert(&arm_adc.pin0, SampleTime::Cycles_480) as f32),
-            upper_axis: Some(arm_adc.adc.convert(&arm_adc.pin2, SampleTime::Cycles_480) as f32),
-            rotation_axis: Some(arm_adc.adc.convert(&arm_adc.pin3, SampleTime::Cycles_480) as f32),
+            lower_axis: Some(LOWER_ARM_TUNING.rescale(arm_adc.adc.convert(&arm_adc.pa4, SampleTime::Cycles_480))),
+            upper_axis: Some(UPPER_ARM_TUNING.rescale(arm_adc.adc.convert(&arm_adc.pa6, SampleTime::Cycles_480))),
+            rotation_axis: Some(AZIMUTH_AXIS_TUNING.rescale(arm_adc.adc.convert(&arm_adc.pa7, SampleTime::Cycles_480))),
             grip: GripperPose {
                 rotation_axis: None,
                 gripper_axis: None,
-                pitch_axis: Some(arm_adc.adc.convert(&arm_adc.pin1, SampleTime::Cycles_480) as f32),
+                pitch_axis: Some(arm_adc.adc.convert(&arm_adc.pa5, SampleTime::Cycles_480) as f32),
 
             },
         };
@@ -209,36 +199,31 @@ fn tim6_interrupt(context: tim6_interrupt::Context) {
     arm_ptr.lock(|arm_ptr| {
         let lower = arm_adc_ptr
             .adc
-            .convert(&mut arm_adc_ptr.pin0, SampleTime::Cycles_480);
+            .convert(&mut arm_adc_ptr.pa4, SampleTime::Cycles_480);
         let center = arm_adc_ptr
             .adc
-            .convert(&mut arm_adc_ptr.pin1, SampleTime::Cycles_480);
+            .convert(&mut arm_adc_ptr.pa5, SampleTime::Cycles_480);
         let upper = arm_adc_ptr
             .adc
-            .convert(&mut arm_adc_ptr.pin2, SampleTime::Cycles_480);
+            .convert(&mut arm_adc_ptr.pa6, SampleTime::Cycles_480);
         let rotation = arm_adc_ptr
             .adc
-            .convert(&mut arm_adc_ptr.pin3, SampleTime::Cycles_480);
+            .convert(&mut arm_adc_ptr.pa7, SampleTime::Cycles_480);
 
-        arm_ptr.lower_axis = Some(arm_adc_ptr
+        arm_ptr.lower_axis = Some(LOWER_ARM_TUNING.rescale(arm_adc_ptr
             .adc
-            .sample_to_millivolts(lower).into());
-        arm_ptr.grip.pitch_axis = Some(arm_adc_ptr
+            .sample_to_millivolts(lower)));
+        arm_ptr.grip.pitch_axis = Some(AZIMUTH_AXIS_TUNING.rescale(arm_adc_ptr
             .adc
-            .sample_to_millivolts(center).into());
-        arm_ptr.upper_axis = Some(arm_adc_ptr
+            .sample_to_millivolts(center)));
+        arm_ptr.upper_axis = Some(UPPER_ARM_TUNING.rescale(arm_adc_ptr
             .adc
-            .sample_to_millivolts(upper).into());
-        arm_ptr.rotation_axis = Some(arm_adc_ptr
+            .sample_to_millivolts(upper)));
+        arm_ptr.rotation_axis = Some(AZIMUTH_AXIS_TUNING.rescale(arm_adc_ptr
             .adc
-            .sample_to_millivolts(rotation).into());
-        // #[cfg(debug_assertions)]
-        // rprintln!("[pre-convert] observed state := {:?}", arm_ptr);
-        arm_ptr.convert();
-
+            .sample_to_millivolts(rotation)));
         #[cfg(debug_assertions)]
-        rprintln!("observed state := {:?}", arm_ptr);
-        // rprintln!("{:?}", arm_adc_ptr.adc.sample_to_millivolts(arm_ptr.lower_axis));
+        rprintln!("[post-convert] observed state := {:?}", arm_ptr);
     });
 }
 
