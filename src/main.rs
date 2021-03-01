@@ -209,7 +209,8 @@ fn tim6_interrupt(context: tim6_interrupt::Context) {
         let rotation = arm_adc_ptr
             .adc
             .convert(&mut arm_adc_ptr.pa7, SampleTime::Cycles_480);
-
+        #[cfg(debug_assertions)]
+        rprintln!("[pre-convert] observed state :: lower := {:?} center := {:?} upper := {:?} rotation := {:?}", lower, center, upper, rotation);
         arm_ptr.lower_axis = Some(LOWER_ARM_TUNING.rescale(arm_adc_ptr
             .adc
             .sample_to_millivolts(lower)));

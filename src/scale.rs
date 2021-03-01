@@ -25,4 +25,4 @@ impl AdcTuning {
 
 pub const LOWER_ARM_TUNING: AdcTuning = AdcTuning::new(1000,SIGNAL_CEIL);
 pub const UPPER_ARM_TUNING: AdcTuning = AdcTuning::new(650, 1300);
-pub const AZIMUTH_AXIS_TUNING: AdcTuning = AdcTuning::new(0, 1700);
+pub const AZIMUTH_AXIS_TUNING: AdcTuning = AdcTuning::new(0, 740);
