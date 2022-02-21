@@ -66,7 +66,6 @@ const APP: () = {
 
     #[init]
     fn init(context: init::Context) -> init::LateResources {
-        #[cfg(debug_assertions)]
         rtt_init_print!();
 
         #[cfg(debug_assertions)]
@@ -223,8 +222,12 @@ fn tim6_interrupt(context: tim6_interrupt::Context) {
         arm_ptr.rotation_axis = Some(AZIMUTH_AXIS_TUNING.rescale(arm_adc_ptr
             .adc
             .sample_to_millivolts(rotation)));
-        #[cfg(debug_assertions)]
-        rprintln!("[post-convert] observed state := {:?}", arm_ptr);
+        let tmp = arm_ptr.lower_axis;
+        let tmp2 = arm_ptr.upper_axis;
+        arm_ptr.upper_axis = tmp;
+        arm_ptr.lower_axis = tmp2;
+        // #[cfg(debug_assertions)]
+        // rprintln!("[post-convert] observed state := {:?}", arm_ptr);
     });
 }
 
